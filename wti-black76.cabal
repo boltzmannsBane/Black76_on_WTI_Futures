@@ -1,0 +1,25 @@
+cabal-version:       >=1.24
+name:                wti-black76
+version:             0.1.0.0
+synopsis:            Black-76 pricing + Greeks + QuickCheck tests
+license:             BSD3
+author:              You
+maintainer:          you@example.com
+build-type:          Simple
+
+library
+  exposed-modules:     Black76
+  hs-source-dirs:      src
+  build-depends:       base >=4.9 && <5,
+                       statistics
+  default-language:    Haskell2010
+
+test-suite black76-tests
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Black76Tests.hs
+  build-depends:       base,
+                       QuickCheck,
+                       statistics,
+                       wti-black76
+  default-language:    Haskell2010
