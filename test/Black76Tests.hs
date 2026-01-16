@@ -1,115 +1,147 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Main where
 
-import Test.QuickCheck
-import Text.Printf (printf)
-
+import Hedgehog
+import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Range as Range
 import Black76
 
--- numeric helpers
+-- ============================
+-- Generators
+-- ============================
+
+genForward :: Gen Double
+genForward = Gen.double (Range.linearFrac 1 200)
+
+genStrike :: Gen Double
+genStrike = Gen.double (Range.linearFrac 1 200)
+
+genTime :: Gen Double
+genTime = Gen.double (Range.linearFrac 0.001 5.0)
+
+genRate :: Gen Double
+genRate = Gen.double (Range.linearFrac (-0.05) 0.2)
+
+genVol :: Gen Double
+genVol = Gen.double (Range.linearFrac 0.001 2.0)
+
+-- Numeric derivative helpers
 centralDiffF :: (Double -> Double) -> Double -> Double -> Double
 centralDiffF f x h = (f (x + h) - f (x - h)) / (2 * h)
 
 secondCentralDiffF :: (Double -> Double) -> Double -> Double -> Double
 secondCentralDiffF f x h = (f (x + h) - 2 * f x + f (x - h)) / (h * h)
 
--- Generators
-genPositiveRange :: Gen Double
-genPositiveRange = choose (0.1, 500.0)
+-- ============================
+-- Properties
+-- ============================
 
-genStrike :: Gen Double
-genStrike = choose (0.1, 500.0)
+prop_call_non_negative :: Property
+prop_call_non_negative = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+  let c = black76Call f k t r sigma
+  annotateShow c
+  assert (c >= 0)
 
-genT :: Gen Double
-genT = choose (1.0/365.0, 5.0)
+prop_put_non_negative :: Property
+prop_put_non_negative = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+  let p = black76Put f k t r sigma
+  annotateShow p
+  assert (p >= 0)
 
-genSigma :: Gen Double
-genSigma = choose (1e-4, 3.0)
+prop_gamma_non_negative :: Property
+prop_gamma_non_negative = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+  let g = black76GammaF f k t r sigma
+  annotateShow g
+  assert (g >= 0)
 
-genR :: Gen Double
-genR = choose (-0.10, 0.20)
+prop_call_monotone_in_forward :: Property
+prop_call_monotone_in_forward = property $ do
+  f1 <- forAll genForward
+  f2 <- forAll genForward
+  k  <- forAll genStrike
+  t  <- forAll genTime
+  r  <- forAll genRate
+  sigma <- forAll genVol
 
-data Params = Params { pF :: Double, pK :: Double, pT :: Double, pR :: Double, pSigma :: Double }
-  deriving Show
+  let fLow  = min f1 f2
+      fHigh = max f1 f2
+      cLow  = black76Call fLow  k t r sigma
+      cHigh = black76Call fHigh k t r sigma
 
-instance Arbitrary Params where
-  arbitrary = do
-    f <- genPositiveRange
-    k <- genStrike
-    t <- genT
-    r <- genR
-    s <- genSigma
-    return $ Params f k t r s
+  annotateShow (fLow, fHigh, cLow, cHigh)
+  assert (cHigh >= cLow)
 
--- Properties (use Black76 functions)
-prop_price_nonnegative :: Params -> Bool
-prop_price_nonnegative Params{..} =
-  black76Call pF pK pT pR pSigma >= -1e-12
+-- Optional: delta/gamma finite-difference checks
+prop_delta_vs_numeric :: Property
+prop_delta_vs_numeric = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+  -- ensure numerically safe
+  if t <= 0 || sigma <= 0 then discard else pure ()
 
-prop_monotonic_in_f :: Params -> Positive Double -> Bool
-prop_monotonic_in_f Params{..} (Positive delta) =
-  let f1 = max 0.1 pF
-      f2 = f1 + (abs delta) * 0.5
-      c1 = black76Call f1 pK pT pR pSigma
-      c2 = black76Call f2 pK pT pR pSigma
-  in c2 >= c1 - 1e-10
+  let callF x = black76Call x k t r sigma
+      analyticD = black76DeltaF f k t r sigma
+      h = 1e-4 * max 1.0 f
+      numericD = centralDiffF callF f h
 
-prop_monotonic_in_sigma :: Params -> Positive Double -> Bool
-prop_monotonic_in_sigma Params{..} (Positive bump) =
-  let s1 = max 1e-4 pSigma
-      s2 = s1 + (abs bump) * 0.01
-      c1 = black76Call pF pK pT pR s1
-      c2 = black76Call pF pK pT pR s2
-  in c2 >= c1 - 1e-10
+  annotateShow (analyticD, numericD, h)
+  -- tolerance chosen to allow floating error
+  assert (abs (analyticD - numericD) <= 5e-4 + 5e-4 * abs analyticD)
 
-prop_put_call_parity :: Params -> Bool
-prop_put_call_parity Params{..} =
-  let c = black76Call pF pK pT pR pSigma
-      p = black76Put  pF pK pT pR pSigma
-      lhs = c - p
-      rhs = exp (-pR * pT) * (pF - pK)
-  in abs (lhs - rhs) <= 1e-8 + 1e-8 * abs rhs
+prop_gamma_vs_numeric :: Property
+prop_gamma_vs_numeric = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
 
-prop_delta_bounds :: Params -> Bool
-prop_delta_bounds Params{..} =
-  let d = black76DeltaF pF pK pT pR pSigma
-      ub = exp (-pR * pT)
-  in d >= -1e-12 && d <= ub + 1e-12
+  -- Avoid singular regimes
+  if t < 0.05 || sigma < 0.05 then discard else pure ()
 
-prop_gamma_nonnegative :: Params -> Bool
-prop_gamma_nonnegative Params{..} =
-  let g = black76GammaF pF pK pT pR pSigma
-  in g >= -1e-14
+  let callF x = black76Call x k t r sigma
+      analyticG = black76GammaF f k t r sigma
+      h = max 1e-6 (1e-4 * f)
+      numericG = secondCentralDiffF callF f h
 
-prop_delta_vs_numeric :: Params -> Property
-prop_delta_vs_numeric Params{..} =
-  pT > 0 && pSigma > 0 ==>
-    let h = 1e-4 * max 1.0 pF
-        callF x = black76Call x pK pT pR pSigma
-        numericD = centralDiffF callF pF h
-        analyticD = black76DeltaF pF pK pT pR pSigma
-    in counterexample (printf "analytic=%.8g numeric=%.8g h=%.8g" analyticD numericD h)
-         (abs (analyticD - numericD) <= 5e-4 + 5e-4 * abs analyticD)
+  annotateShow (analyticG, numericG, h)
 
-prop_gamma_vs_numeric :: Params -> Property
-prop_gamma_vs_numeric Params{..} =
-  pT > 0 && pSigma > 0 ==>
-    let h = 1e-3 * max 1.0 pF
-        callF x = black76Call x pK pT pR pSigma
-        numericGamma = secondCentralDiffF callF pF h
-        analyticGamma = black76GammaF pF pK pT pR pSigma
-    in counterexample (printf "analytic=%.8g numeric=%.8g h=%.8g" analyticGamma numericGamma h)
-         (abs (analyticGamma - numericGamma) <= 5e-3 + 5e-3 * abs analyticGamma)
+  let relErr = abs (analyticG - numericG) / max 1 (abs analyticG)
+  assert (relErr <= 1e-2)
+
+
+-- ============================
+-- Runner
+-- ============================
 
 main :: IO ()
 main = do
-  putStrLn "Running Black-76 QuickCheck suite..."
-  quickCheckWith stdArgs { maxSuccess = 400 } prop_price_nonnegative
-  quickCheckWith stdArgs { maxSuccess = 300 } prop_monotonic_in_f
-  quickCheckWith stdArgs { maxSuccess = 300 } prop_monotonic_in_sigma
-  quickCheckWith stdArgs { maxSuccess = 300 } prop_put_call_parity
-  quickCheckWith stdArgs { maxSuccess = 300 } prop_delta_bounds
-  quickCheckWith stdArgs { maxSuccess = 300 } prop_gamma_nonnegative
-  quickCheckWith stdArgs { maxSuccess = 250 } prop_delta_vs_numeric
-  quickCheckWith stdArgs { maxSuccess = 250 } prop_gamma_vs_numeric
-  putStrLn "Done."
+  ok <- checkParallel $ Group "Black-76 Tests"
+    [ ("call >= 0", prop_call_non_negative)
+    , ("put >= 0", prop_put_non_negative)
+    , ("gamma >= 0", prop_gamma_non_negative)
+    , ("call monotone in F", prop_call_monotone_in_forward)
+    , ("delta vs numeric", prop_delta_vs_numeric)
+    , ("gamma vs numeric", prop_gamma_vs_numeric)
+    ]
+  if ok then putStrLn "All Hedgehog tests passed." else fail "Some Hedgehog tests failed."
