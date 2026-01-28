@@ -81,6 +81,34 @@ prop_gamma_non_negative = property $ do
   annotateShow g
   assert (g >= 0)
 
+prop_vega_non_negative :: Property
+prop_vega_non_negative = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+  let v = black76Vega f k t r sigma
+  annotateShow v
+  assert (v >= 0)
+
+prop_call_monotone_in_sigma :: Property
+prop_call_monotone_in_sigma = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma1 <- forAll genVol
+  sigma2 <- forAll genVol
+
+  let sigmaLow  = min sigma1 sigma2
+      sigmaHigh = max sigma1 sigma2
+      cLow  = black76Call f k t r sigmaLow
+      cHigh = black76Call f k t r sigmaHigh
+
+  annotateShow (sigmaLow, sigmaHigh, cLow, cHigh)
+  assert (cHigh >= cLow - 1e-12)  -- small tolerance for FP
+
 prop_call_monotone_in_forward :: Property
 prop_call_monotone_in_forward = property $ do
   f1 <- forAll genForward
@@ -191,6 +219,26 @@ prop_gamma_vs_numeric = property $ do
       let relErr = abs (analyticG - numericG) / max 1e-12 (abs analyticG)
       in assert (relErr <= relTol)
 
+prop_vega_vs_numeric :: Property
+prop_vega_vs_numeric = property $ do
+  f <- forAll genForward
+  k <- forAll genStrike
+  t <- forAll genTime
+  r <- forAll genRate
+  sigma <- forAll genVol
+
+  -- Avoid numerically pathological regions
+  when (t < 0.01 || sigma < 0.01) discard
+
+  let callSigma s = black76Call f k t r s
+      analyticV = black76Vega f k t r sigma
+      h = 1e-4 * max 0.01 sigma
+      numericV = centralDiffF callSigma sigma h
+      tol = 5e-4 + 5e-4 * abs analyticV
+
+  annotate $ printf "analyticV=%.12g numericV=%.12g h=%.6g" analyticV numericV h
+  assert (abs (analyticV - numericV) <= tol)
+
 -- ============================
 -- Limit behavior tests
 -- ============================
@@ -251,11 +299,14 @@ tests = checkParallel $ Group "Black-76 Tests"
   [ ("call >= 0", prop_call_non_negative)
   , ("put >= 0", prop_put_non_negative)
   , ("gamma >= 0", prop_gamma_non_negative)
+  , ("vega >= 0", prop_vega_non_negative)
   , ("call monotone in F", prop_call_monotone_in_forward)
+  , ("call monotone in sigma", prop_call_monotone_in_sigma)
   , ("put-call parity", prop_put_call_parity)
   , ("call bounds (no-arb)", prop_call_lower_upper_bounds)
   , ("delta vs numeric", prop_delta_vs_numeric)
   , ("gamma vs numeric", prop_gamma_vs_numeric)
+  , ("vega vs numeric", prop_vega_vs_numeric)
   , ("sigma -> 0 limit", prop_sigma_zero_limit)
   , ("sigma -> large limit", prop_sigma_large_limit)
   , ("t -> 0 limit", prop_time_zero_limit)

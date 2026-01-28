@@ -1,132 +1,214 @@
+# mojo/bridge.mojo
+# Mojo bridge for Haskell <-> Monte Carlo simulation
+# Reads input.json, runs MC, writes output.json with VaR/CVaR
+
 from math import sqrt, exp, log, cos
+from pathlib import Path
+
+
+# --- Random Number Generator ---
 
 struct RNG:
     var state: Int
 
-    fn __init__(out self, state: Int):
-        self.state = state
+    fn __init__(out self, seed: Int):
+        self.state = seed
 
     fn next_float(mut self) -> Float64:
-        # Simple Linear Congruential Generator
-        self.state = (self.state * 1103515245 + 12345) & 0x7fffffff
+        # Linear Congruential Generator
+        self.state = (self.state * 1103515245 + 12345) & 0x7FFFFFFF
         return Float64(self.state) / 2147483647.0
 
     fn next_gaussian(mut self) -> Float64:
+        # Box-Muller transform
         var u1 = self.next_float()
         var u2 = self.next_float()
-        if u1 < 1e-9:
-            u1 = 1e-9
-        return sqrt(-2.0 * log(u1)) * cos(2.0 * 3.1415926535 * u2)
+        if u1 < 1e-10:
+            u1 = 1e-10
+        return sqrt(-2.0 * log(u1)) * cos(2.0 * 3.141592653589793 * u2)
 
 
-struct MCStats:
+# --- Result struct ---
+
+struct MCResult:
+    var var_99: Float64
+    var cvar_99: Float64
     var mean: Float64
-    var variance: Float64
-    var paths: Int
-    var std_error: Float64
+    var std: Float64
 
-    fn __init__(out self, mean: Float64, variance: Float64, paths: Int):
+    fn __init__(out self, var_99: Float64, cvar_99: Float64, mean: Float64, std: Float64):
+        self.var_99 = var_99
+        self.cvar_99 = cvar_99
         self.mean = mean
-        self.variance = variance
-        self.paths = paths
-        # Standard Error = sqrt(variance / paths)
-        self.std_error = sqrt(variance / Float64(paths))
+        self.std = std
 
 
-fn simulate_one_path(
-    f0: Float64,
-    k: Float64,
-    t: Float64,
+# --- Monte Carlo Engine ---
+
+fn simulate_path(
+    s0: Float64,
+    mu: Float64,
     sigma: Float64,
+    r: Float64,
+    k: Float64,
     steps: Int,
-    mut rng: RNG
+    mut rng: RNG,
 ) -> Float64:
-    var dt = t / Float64(steps)
-    var price = f0
-    
-    # Precompute constants
-    var drift = -0.5 * sigma * sigma * dt
-    var vol_coef = sigma * sqrt(dt)
+    """Simulate one GBM path and return discounted call payoff."""
+    var dt = 1.0 / Float64(steps)
+    var price = s0
+
+    # GBM: dS = mu*S*dt + sigma*S*dW
+    var drift = (mu - 0.5 * sigma * sigma) * dt
+    var vol = sigma * sqrt(dt)
 
     for _ in range(steps):
         var z = rng.next_gaussian()
-        price = price * exp(drift + vol_coef * z)
+        price = price * exp(drift + vol * z)
 
-    # Payoff for Call Option
-    return max(price - k, 0.0)
+    # European call payoff, discounted
+    var payoff = max(price - k, 0.0)
+    return exp(-r * 1.0) * payoff
 
 
 fn run_monte_carlo(
-    f0: Float64,
-    k: Float64,
-    t: Float64,
+    s0: Float64,
+    mu: Float64,
     sigma: Float64,
+    r: Float64,
+    k: Float64,
     steps: Int,
     paths: Int,
-    mut rng: RNG
-) -> MCStats:
-    var sum = 0.0
-    var sumsq = 0.0
+) -> MCResult:
+    """Run MC simulation and return VaR, CVaR, mean, std."""
+    var rng = RNG(42)
 
-    var i = 0
-    while i < paths:
-        var pnl = simulate_one_path(f0, k, t, sigma, steps, rng)
-        sum = sum + pnl
-        sumsq = sumsq + pnl * pnl
-        i = i + 1
+    # Collect all payoffs
+    var payoffs = List[Float64]()
+    for _ in range(paths):
+        var pnl = simulate_path(s0, mu, sigma, r, k, steps, rng)
+        payoffs.append(pnl)
 
-    var mean = sum / Float64(paths)
-    var var_ = sumsq / Float64(paths) - mean * mean
+    # Compute mean and std
+    var sum_val: Float64 = 0.0
+    var sum_sq: Float64 = 0.0
+    for i in range(len(payoffs)):
+        sum_val += payoffs[i]
+        sum_sq += payoffs[i] * payoffs[i]
 
-    return MCStats(mean, var_, paths)
+    var mean = sum_val / Float64(paths)
+    var variance = sum_sq / Float64(paths) - mean * mean
+    var std = sqrt(max(variance, 0.0))
+
+    # Sort payoffs for VaR/CVaR (ascending order)
+    for i in range(len(payoffs)):
+        for j in range(i + 1, len(payoffs)):
+            if payoffs[j] < payoffs[i]:
+                var tmp = payoffs[i]
+                payoffs[i] = payoffs[j]
+                payoffs[j] = tmp
+
+    # VaR at 99% = 1st percentile of P&L (worst 1%)
+    var var_idx = Int(Float64(paths) * 0.01)
+    if var_idx < 1:
+        var_idx = 1
+    var var_99 = payoffs[var_idx - 1]
+
+    # CVaR = expected value of worst 1%
+    var cvar_sum: Float64 = 0.0
+    for i in range(var_idx):
+        cvar_sum += payoffs[i]
+    var cvar_99 = cvar_sum / Float64(var_idx)
+
+    return MCResult(var_99, cvar_99, mean, std)
 
 
-# --- TEST HELPERS ---
+# --- JSON Parsing (minimal manual parser) ---
 
-fn assert_true(condition: Bool, msg: String):
-    if condition:
-        print("[PASS] " + msg)
+fn is_whitespace(c: String) -> Bool:
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+
+
+fn is_delimiter(c: String) -> Bool:
+    return c == "," or c == "}"
+
+
+fn find_field_value(content: String, field: String) -> String:
+    """Extract a field value from JSON string."""
+    var search = '"' + field + '":'
+    var idx = content.find(search)
+    if idx == -1:
+        return ""
+
+    var start = idx + len(search)
+
+    # Skip whitespace
+    while start < len(content) and is_whitespace(String(content[start])):
+        start += 1
+
+    # Read until comma or closing brace
+    var end = start
+    while end < len(content) and not is_delimiter(String(content[end])):
+        end += 1
+
+    return content[start:end]
+
+
+fn strip_spaces(s: String) -> String:
+    """Remove leading/trailing spaces."""
+    var result = String("")
+    for i in range(len(s)):
+        var c = String(s[i])
+        if c != " ":
+            result += c
+    return result
+
+
+fn parse_float(s: String) raises -> Float64:
+    """Parse a float from string, handling scientific notation."""
+    var cleaned = strip_spaces(s)
+
+    # Handle scientific notation like 1.0e-2
+    var e_idx = -1
+    for i in range(len(cleaned)):
+        var c = String(cleaned[i])
+        if c == "e" or c == "E":
+            e_idx = i
+            break
+
+    if e_idx == -1:
+        return atof(cleaned)
     else:
-        print("[FAIL] " + msg)
-
-fn main():
-    print("Running Black-Scholes Monte Carlo Tests...\n")
-
-    # --- Test 1: Variance Sanity ---
-    # Expectation: Variance should be > 0 for a standard option
-    var rng1 = RNG(1001)
-    var stats1 = run_monte_carlo(50.0, 50.0, 1.0, 0.2, 50, 1000, rng1)
-    
-    assert_true(stats1.variance > 0.0, "Variance is positive")
-    print("      (Variance was: " + String(stats1.variance) + ")\n")
+        var mantissa = atof(cleaned[0:e_idx])
+        var exp_str = cleaned[e_idx + 1 : len(cleaned)]
+        var exponent = atof(exp_str)
+        return mantissa * (10.0 ** exponent)
 
 
-    # --- Test 2: Deep Out-of-the-Money (OTM) ---
-    # Expectation: If Strike (K) is much higher than Price (F0), mean PnL -> 0
-    var rng2 = RNG(2002)
-    # Price = 10, Strike = 100. Impossible to reach in 1 year with 20% vol.
-    var stats2 = run_monte_carlo(10.0, 100.0, 1.0, 0.2, 50, 1000, rng2)
-    
-    assert_true(stats2.mean < 0.01, "Deep OTM option value approx 0")
-    print("      (Mean PnL was: " + String(stats2.mean) + ")\n")
+fn parse_int(s: String) raises -> Int:
+    """Parse an integer from string."""
+    return atol(strip_spaces(s))
 
 
-    # --- Test 3: Monte Carlo Convergence (Noise Reduction) ---
-    # Expectation: Quadrupling paths should roughly halve the Standard Error.
-    # We compare 10,000 paths vs 40,000 paths.
-    
-    var rng3 = RNG(3003)
-    var paths_low = 10000
-    var stats_low = run_monte_carlo(50.0, 50.0, 1.0, 0.2, 50, paths_low, rng3)
-    
-    var rng4 = RNG(4004)
-    var paths_high = 40000
-    var stats_high = run_monte_carlo(50.0, 50.0, 1.0, 0.2, 50, paths_high, rng4)
+fn main() raises:
+    # Read input.json
+    var input_path = Path("input.json")
+    var content = input_path.read_text()
 
-    print("Checking Convergence:")
-    print("  Low Paths  (" + String(paths_low) + ") StdErr: " + String(stats_low.std_error))
-    print("  High Paths (" + String(paths_high) + ") StdErr: " + String(stats_high.std_error))
-    
-    # Ideally ratio is ~2.0. We check if High error is less than Low error * 0.75 (generous buffer)
-    var improved = stats_high.std_error < stats_low.std_error
-    assert_true(improved, "More paths reduced the Standard Error")
+    # Parse input parameters
+    var s0 = parse_float(find_field_value(content, "s0"))
+    var mu = parse_float(find_field_value(content, "mu"))
+    var sigma = parse_float(find_field_value(content, "sigma"))
+    var r = parse_float(find_field_value(content, "r"))
+    var k = parse_float(find_field_value(content, "k"))
+    var steps = parse_int(find_field_value(content, "steps"))
+    var paths = parse_int(find_field_value(content, "paths"))
+
+    # Run Monte Carlo
+    var result = run_monte_carlo(s0, mu, sigma, r, k, steps, paths)
+
+    # Write output.json
+    var output = '{"var_99": ' + String(result.var_99) + ', "cvar_99": ' + String(result.cvar_99) + ', "mean": ' + String(result.mean) + ', "std": ' + String(result.std) + "}"
+
+    var output_path = Path("output.json")
+    output_path.write_text(output)

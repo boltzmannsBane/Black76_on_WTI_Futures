@@ -3,6 +3,7 @@ module Black76
   , black76Put
   , black76DeltaF
   , black76GammaF
+  , black76Vega
   ) where
 
 black76Call :: Double -> Double -> Double -> Double -> Double -> Double
@@ -38,6 +39,18 @@ black76GammaF f k t r sigma
   | t <= 0    = 0
   | otherwise =
       exp (-r * t) * normPdf d1 / (f * sigma * sqrt t)
+  where
+    denom = sigma * sqrt t
+    d1 = (log (f / k) + 0.5 * sigma * sigma * t) / denom
+
+-- | Vega: sensitivity of option price to volatility
+-- Vega = e^(-rT) * F * sqrt(T) * N'(d1)
+-- Same for calls and puts
+black76Vega :: Double -> Double -> Double -> Double -> Double -> Double
+black76Vega f k t r sigma
+  | t <= 0    = 0
+  | otherwise =
+      exp (-r * t) * f * sqrt t * normPdf d1
   where
     denom = sigma * sqrt t
     d1 = (log (f / k) + 0.5 * sigma * sigma * t) / denom

@@ -11,6 +11,7 @@ library
   hs-source-dirs: src
   exposed-modules:
       Black76
+      DataLoader
       HedgeSim
       MojoBridge
   build-depends:
@@ -20,6 +21,16 @@ library
     , process
   default-language: Haskell2010
 
+executable wti-hedge
+  hs-source-dirs: src
+  main-is: Main.hs
+  build-depends:
+      base
+    , aeson
+    , bytestring
+    , process
+    , wti-black76
+  default-language: Haskell2010
 
 test-suite black76-tests
   type:                exitcode-stdio-1.0
