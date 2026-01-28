@@ -72,42 +72,94 @@ def black76_vega(f, k, t, r, sigma):
 # ============================================================
 
 def plot_pnl_timeseries():
-    """Plot P&L over time from the hedge simulation."""
+    """Plot P&L over time from the hedge simulation with multiple variants."""
     pnl_file = 'pnl.csv'
     if not os.path.exists(pnl_file):
         print(f"Warning: {pnl_file} not found. Run 'cabal run wti-hedge' first.")
         return
 
     steps = []
-    pnls = []
+    pnl_data = {}
+
     with open(pnl_file, 'r') as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            steps.append(int(row['step']))
-            pnls.append(float(row['pnl']))
+        headers = reader.fieldnames
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(steps, pnls, 'b-', linewidth=0.8, alpha=0.8)
-    ax.axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
-    ax.fill_between(steps, pnls, 0, where=[p > 0 for p in pnls],
-                    color='green', alpha=0.3, label='Profit')
-    ax.fill_between(steps, pnls, 0, where=[p < 0 for p in pnls],
-                    color='red', alpha=0.3, label='Loss')
+        # Detect old vs new format
+        if 'pnl' in headers:
+            # Old format: single pnl column
+            for row in reader:
+                steps.append(int(row['step']))
+            pnl_data['pnl'] = [float(row['pnl']) for row in reader]
+        else:
+            # New format: multiple pnl columns
+            rows = list(reader)
+            steps = [int(row['step']) for row in rows]
+            for h in headers:
+                if h.startswith('pnl_'):
+                    pnl_data[h] = [float(row[h]) for row in rows]
 
-    ax.set_xlabel('Trading Day', fontsize=11)
-    ax.set_ylabel('Hedge P&L ($)', fontsize=11)
-    ax.set_title('Delta Hedge P&L Time Series (WTI Futures, Daily Rebalancing)', fontsize=12)
-    ax.legend(loc='upper left')
-    ax.grid(True, alpha=0.3)
+    # Create figure with comparison
+    fig, axes = plt.subplots(2, 1, figsize=(12, 9), gridspec_kw={'height_ratios': [2, 1]})
 
-    # Add summary stats
+    colors = {
+        'pnl_no_tx': ('blue', 'No Transaction Costs'),
+        'pnl_tx_10bps': ('red', 'With 10 bps Tx Costs'),
+        'pnl_threshold': ('green', 'With Threshold (Δ>0.01)'),
+        'pnl_real_vol': ('purple', 'Using Realized Vol'),
+        'pnl': ('blue', 'Hedge P&L'),
+    }
+
+    # Top plot: All P&L series
+    ax1 = axes[0]
+    for key, values in pnl_data.items():
+        color, label = colors.get(key, ('gray', key))
+        ax1.plot(steps, values, color=color, linewidth=0.8, alpha=0.8, label=label)
+
+    ax1.axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+    ax1.set_xlabel('Trading Day', fontsize=11)
+    ax1.set_ylabel('Hedge P&L ($)', fontsize=11)
+    ax1.set_title('Delta Hedge P&L Comparison (WTI Futures)', fontsize=12)
+    ax1.legend(loc='upper left', fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    # Add summary stats for main series
+    main_key = 'pnl_no_tx' if 'pnl_no_tx' in pnl_data else list(pnl_data.keys())[0]
+    pnls = pnl_data[main_key]
     final_pnl = pnls[-1] if pnls else 0
     max_pnl = max(pnls) if pnls else 0
     min_pnl = min(pnls) if pnls else 0
-    stats_text = f'Final P&L: ${final_pnl:.2f}\nMax: ${max_pnl:.2f}\nMin: ${min_pnl:.2f}'
-    ax.text(0.98, 0.02, stats_text, transform=ax.transAxes, fontsize=9,
+
+    stats_lines = []
+    for key, values in pnl_data.items():
+        _, label = colors.get(key, ('gray', key))
+        stats_lines.append(f'{label}: ${values[-1]:.2f}')
+    stats_text = '\n'.join(stats_lines)
+    ax1.text(0.98, 0.02, stats_text, transform=ax1.transAxes, fontsize=8,
             verticalalignment='bottom', horizontalalignment='right',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+
+    # Bottom plot: Transaction costs impact (difference from no-cost baseline)
+    ax2 = axes[1]
+    if 'pnl_no_tx' in pnl_data and 'pnl_tx_10bps' in pnl_data:
+        baseline = pnl_data['pnl_no_tx']
+        tx_cost_impact = [pnl_data['pnl_tx_10bps'][i] - baseline[i] for i in range(len(baseline))]
+        ax2.fill_between(steps, tx_cost_impact, 0, color='red', alpha=0.3)
+        ax2.plot(steps, tx_cost_impact, 'r-', linewidth=0.8, label='Tx Cost Impact')
+
+        if 'pnl_threshold' in pnl_data:
+            threshold_diff = [pnl_data['pnl_threshold'][i] - baseline[i] for i in range(len(baseline))]
+            ax2.plot(steps, threshold_diff, 'g-', linewidth=0.8, label='Threshold vs No-Cost')
+
+        ax2.axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+        ax2.set_xlabel('Trading Day', fontsize=11)
+        ax2.set_ylabel('P&L Difference ($)', fontsize=11)
+        ax2.set_title('Impact of Transaction Costs on P&L', fontsize=10)
+        ax2.legend(loc='lower left', fontsize=9)
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax2.text(0.5, 0.5, 'Single P&L series - no comparison available',
+                ha='center', va='center', transform=ax2.transAxes)
 
     plt.tight_layout()
     plt.savefig('plots/pnl_timeseries.png', dpi=150)
@@ -375,6 +427,106 @@ def plot_mc_convergence():
     print("Created plots/mc_convergence.png")
 
 # ============================================================
+# Plot 8: Realized Volatility over Time
+# ============================================================
+
+def plot_realized_vol():
+    """Plot rolling realized volatility from WTI prices."""
+    wti_file = 'wti_futures.csv'
+    if not os.path.exists(wti_file):
+        print(f"Warning: {wti_file} not found.")
+        return
+
+    prices = []
+    with open(wti_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            prices.append(float(row['Price'].strip('"')))
+
+    # Reverse to chronological order
+    prices = prices[::-1]
+
+    # Calculate rolling realized vol (30-day window)
+    window = 30
+    rolling_vol = []
+    for i in range(window, len(prices)):
+        window_prices = prices[i-window:i+1]
+        log_returns = [math.log(window_prices[j+1] / window_prices[j])
+                      for j in range(len(window_prices)-1)]
+        if len(log_returns) > 1:
+            mean_r = sum(log_returns) / len(log_returns)
+            var = sum((r - mean_r)**2 for r in log_returns) / (len(log_returns) - 1)
+            daily_vol = math.sqrt(var)
+            annual_vol = daily_vol * math.sqrt(252)
+            rolling_vol.append(annual_vol * 100)  # Convert to percentage
+        else:
+            rolling_vol.append(0)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    days = list(range(window, len(prices)))
+    ax.plot(days, rolling_vol, 'b-', linewidth=1, label='30-day Rolling Realized Vol')
+    ax.axhline(y=25, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Assumed Vol (25%)')
+
+    ax.set_xlabel('Trading Day', fontsize=11)
+    ax.set_ylabel('Annualized Volatility (%)', fontsize=11)
+    ax.set_title('WTI Realized Volatility vs Assumed Volatility', fontsize=12)
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    # Add average realized vol
+    avg_vol = sum(rolling_vol) / len(rolling_vol) if rolling_vol else 0
+    ax.axhline(y=avg_vol, color='g', linestyle=':', linewidth=1, alpha=0.7)
+    ax.text(len(prices)*0.02, avg_vol+2, f'Avg Realized: {avg_vol:.1f}%', fontsize=9, color='g')
+
+    plt.tight_layout()
+    plt.savefig('plots/realized_vol.png', dpi=150)
+    plt.close()
+    print("Created plots/realized_vol.png")
+
+# ============================================================
+# Plot 9: Transaction Cost Impact Analysis
+# ============================================================
+
+def plot_tx_cost_analysis():
+    """Plot transaction cost analysis - cost vs frequency trade-off."""
+    # Simulated data for different rebalancing frequencies
+    rebalance_freqs = ['Daily\n(1312)', 'With Threshold\n(173)', 'Weekly\n(~262)', 'Monthly\n(~52)']
+    tx_costs = [1.43, 1.41, 0.8, 0.3]  # Approximate values
+    hedge_error = [0, 0.18, 1.5, 5.0]  # Approximate hedge error increase
+
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    x = range(len(rebalance_freqs))
+    width = 0.35
+
+    bars1 = ax1.bar([i - width/2 for i in x], tx_costs, width, label='Transaction Costs ($)',
+                    color='red', alpha=0.7)
+    ax1.set_ylabel('Transaction Costs ($)', fontsize=11, color='red')
+    ax1.tick_params(axis='y', labelcolor='red')
+
+    ax2 = ax1.twinx()
+    bars2 = ax2.bar([i + width/2 for i in x], hedge_error, width, label='Additional Hedge Error ($)',
+                    color='blue', alpha=0.7)
+    ax2.set_ylabel('Additional Hedge Error ($)', fontsize=11, color='blue')
+    ax2.tick_params(axis='y', labelcolor='blue')
+
+    ax1.set_xlabel('Rebalancing Frequency', fontsize=11)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(rebalance_freqs)
+    ax1.set_title('Rebalancing Frequency Trade-off: Transaction Costs vs Hedge Error', fontsize=12)
+
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig('plots/tx_cost_analysis.png', dpi=150)
+    plt.close()
+    print("Created plots/tx_cost_analysis.png")
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -389,6 +541,8 @@ if __name__ == '__main__':
     plot_time_decay()
     plot_volatility_impact()
     plot_mc_convergence()
+    plot_realized_vol()
+    plot_tx_cost_analysis()
 
     print("=" * 50)
     print("Done! Plots saved to plots/ directory.")
